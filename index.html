@@ -112,6 +112,43 @@
     border:2px solid var(--rose-soft);animation:pulse 1.5s ease-out infinite;
   }
   @keyframes pulse{0%{transform:scale(1);opacity:1}100%{transform:scale(1.6);opacity:0}}
+
+  /* Equalizer bars inside the audio button */
+  .eq-bars{
+    display:none;align-items:flex-end;justify-content:center;gap:2px;
+    height:18px;width:22px;
+  }
+  .audio-btn.playing .eq-bars{display:flex}
+  .audio-btn.playing .eq-icon{display:none}
+  .eq-bars span{
+    width:3px;background:#fff;border-radius:2px;
+    animation:eq 0.9s ease-in-out infinite;
+  }
+  .eq-bars span:nth-child(1){animation-delay:0s;height:60%}
+  .eq-bars span:nth-child(2){animation-delay:.2s;height:100%}
+  .eq-bars span:nth-child(3){animation-delay:.4s;height:75%}
+  .eq-bars span:nth-child(4){animation-delay:.1s;height:90%}
+  @keyframes eq{
+    0%,100%{transform:scaleY(.4)}
+    50%{transform:scaleY(1)}
+  }
+
+  /* Floating "now playing" pill */
+  .now-playing{
+    position:fixed;top:22px;right:84px;z-index:100;
+    background:rgba(0,0,0,.7);color:#fff;
+    padding:8px 14px;border-radius:20px;font-size:.78rem;
+    backdrop-filter:blur(8px);
+    border:1px solid rgba(217,109,143,.4);
+    opacity:0;transform:translateX(20px);transition:.4s;
+    pointer-events:none;display:flex;align-items:center;gap:8px;
+  }
+  .now-playing.show{opacity:1;transform:translateX(0)}
+  .now-playing .np-dot{
+    width:8px;height:8px;border-radius:50%;background:#ff6b9d;
+    box-shadow:0 0 8px #ff6b9d;animation:np-pulse 1.2s infinite;
+  }
+  @keyframes np-pulse{0%,100%{opacity:1}50%{opacity:.4}}
   .audio-tooltip{
     position:fixed;top:84px;right:22px;z-index:100;
     background:rgba(0,0,0,.7);color:#fff;padding:8px 14px;border-radius:8px;
@@ -458,6 +495,7 @@
     #quote-text{min-height:130px}
     .audio-btn{top:16px;right:16px;width:44px;height:44px;font-size:17px}
     .audio-tooltip{top:68px;right:16px;font-size:.72rem;padding:6px 10px}
+    .now-playing{top:18px;right:68px;font-size:.72rem;padding:6px 12px}
     .secret-wrap{padding:22px 14px}
     .reason-card{padding:28px 20px}
     .reason-card h3{font-size:1.3rem}
@@ -491,8 +529,12 @@
 <div class="cursor-dot" id="cursor"></div>
 
 <!-- 8D Audio Button -->
-<button class="audio-btn" id="audioBtn" aria-label="Play 8D ambient music">♪</button>
-<div class="audio-tooltip">Use headphones &amp; tap for 8D music 🎧</div>
+<button class="audio-btn" id="audioBtn" aria-label="Play music">
+  <span class="eq-icon">♪</span>
+  <span class="eq-bars"><span></span><span></span><span></span><span></span></span>
+</button>
+<div class="audio-tooltip">Tap for music 🎧 (best with headphones)</div>
+<div class="now-playing" id="nowPlaying"><span class="np-dot"></span><span id="npLabel">music on ♫</span></div>
 
 <!-- Nav -->
 <nav class="nav-dots">
@@ -896,77 +938,211 @@ document.getElementById('secretBtn').addEventListener('click',function(){
   });
 })();
 
-/* ============ 8D AMBIENT AUDIO ============ */
+/* ============ MUSIC PLAYER (MP3 with 8D rotation + synth fallback) ============ */
+/* HOW TO USE YOUR OWN SONG:
+   1. Get your song file (e.g. "Deewana" by Akhil) as an MP3
+   2. Rename it to: song.mp3
+   3. Put song.mp3 in the SAME folder as this index.html
+   4. Reload the page — the ♪ button will play YOUR song with 8D effect
+
+   If song.mp3 is missing, it falls back to a built-in romantic melody.
+*/
 (function(){
   const btn = document.getElementById('audioBtn');
-  let ctx, masterGain, panner, nodes=[], isPlaying=false, animId;
+  const np = document.getElementById('nowPlaying');
+  const npLabel = document.getElementById('npLabel');
 
-  function build(){
+  const SONG_FILE = 'song.mp3';  // ← change filename here if needed
+
+  let ctx, masterGain, panner, source, audioEl;
+  let isPlaying=false, animId, usingMp3=false, hasTriedMp3=false;
+  // synth fallback state
+  let synthState = {padNodes:[], melodyTimer:null, melodyGain:null, padGain:null};
+
+  // ---------- Build audio context + 8D chain ----------
+  function buildContext(){
+    if(ctx) return;
     ctx = new (window.AudioContext||window.webkitAudioContext)();
     masterGain = ctx.createGain();
     masterGain.gain.value = 0;
     panner = ctx.createStereoPanner();
     const filter = ctx.createBiquadFilter();
-    filter.type='lowpass'; filter.frequency.value=2200;
-    const delay = ctx.createDelay();
-    delay.delayTime.value=0.4;
+    filter.type='lowpass'; filter.frequency.value=3500; filter.Q.value=0.4;
+    // reverb-ish delay
+    const delay = ctx.createDelay(); delay.delayTime.value=0.4;
     const fb = ctx.createGain(); fb.gain.value=0.35;
     const wet = ctx.createGain(); wet.gain.value=0.4;
-
     masterGain.connect(filter);
     filter.connect(panner);
     panner.connect(ctx.destination);
-    panner.connect(delay);
-    delay.connect(fb); fb.connect(delay);
+    panner.connect(delay); delay.connect(fb); fb.connect(delay);
     delay.connect(wet); wet.connect(ctx.destination);
-
-    const notes=[130.81, 196.00, 261.63, 329.63, 392.00, 493.88];
-    notes.forEach((freq,i)=>{
-      const osc=ctx.createOscillator();
-      osc.type= i%2===0 ? 'sine' : 'triangle';
-      osc.frequency.value=freq;
-      const g=ctx.createGain();
-      g.gain.value = 0.12 - i*0.012;
-      const lfo=ctx.createOscillator();
-      lfo.frequency.value = 0.15 + i*0.07;
-      const lfoG=ctx.createGain(); lfoG.gain.value = 1.5;
-      lfo.connect(lfoG); lfoG.connect(osc.frequency);
-      osc.connect(g); g.connect(masterGain);
-      osc.start(); lfo.start();
-      nodes.push(osc,lfo);
-    });
   }
 
-  function start8D(){
-    if(!ctx) build();
-    if(ctx.state==='suspended') ctx.resume();
-    isPlaying=true;
-    btn.classList.add('playing');
-    btn.textContent='♫';
-    masterGain.gain.cancelScheduledValues(ctx.currentTime);
-    masterGain.gain.setValueAtTime(masterGain.gain.value, ctx.currentTime);
-    masterGain.gain.linearRampToValueAtTime(0.18, ctx.currentTime+2);
+  function startPanRotation(){
     let angle=0;
     function rotate(){
-      angle += 0.018;
-      panner.pan.value = Math.sin(angle)*0.95;
+      angle += 0.022;
+      panner.pan.value = Math.sin(angle)*0.92;
       animId = requestAnimationFrame(rotate);
     }
     rotate();
   }
+  function stopPanRotation(){ cancelAnimationFrame(animId); }
 
-  function stop8D(){
-    isPlaying=false;
-    btn.classList.remove('playing');
-    btn.textContent='♪';
+  // ---------- MP3 path ----------
+  function startMp3(){
+    buildContext();
+    audioEl = new Audio();
+    audioEl.src = SONG_FILE;
+    audioEl.loop = true;
+    audioEl.crossOrigin = 'anonymous';
+    audioEl.addEventListener('error', ()=>{
+      // MP3 missing or failed — fall back to synth
+      console.log('MP3 not found, using synth melody');
+      usingMp3 = false;
+      hasTriedMp3 = true;
+      npLabel.textContent = 'melody on ♫';
+      startSynth();
+    });
+    audioEl.addEventListener('canplaythrough', ()=>{
+      if(!isPlaying) return;
+      try{
+        if(!source){
+          source = ctx.createMediaElementSource(audioEl);
+          source.connect(masterGain);
+        }
+        audioEl.play().catch(()=>{
+          // play blocked — fall back to synth
+          usingMp3 = false;
+          npLabel.textContent = 'melody on ♫';
+          startSynth();
+        });
+      }catch(e){
+        usingMp3=false; npLabel.textContent='melody on ♫'; startSynth();
+      }
+    });
+    usingMp3 = true;
+    npLabel.textContent = 'song on ♫';
+    // fade in
     masterGain.gain.cancelScheduledValues(ctx.currentTime);
     masterGain.gain.setValueAtTime(masterGain.gain.value, ctx.currentTime);
-    masterGain.gain.linearRampToValueAtTime(0, ctx.currentTime+1);
-    cancelAnimationFrame(animId);
+    masterGain.gain.linearRampToValueAtTime(0.85, ctx.currentTime + 1.2);
+    // resume context
+    if(ctx.state==='suspended'){
+      ctx.resume().catch(()=>{});
+    }
+    startPanRotation();
+  }
+
+  // ---------- Synth fallback ----------
+  function buildSynth(){
+    synthState.padGain = ctx.createGain();
+    synthState.padGain.gain.value = 0.45;
+    synthState.padGain.connect(masterGain);
+    const padNotes=[130.81, 196.00, 261.63, 329.63, 392.00, 493.88];
+    padNotes.forEach((freq,i)=>{
+      const osc=ctx.createOscillator();
+      osc.type= i%2===0 ? 'sine' : 'triangle';
+      osc.frequency.value=freq;
+      const g=ctx.createGain(); g.gain.value = 0.18 - i*0.018;
+      const lfo=ctx.createOscillator(); lfo.frequency.value = 0.15 + i*0.07;
+      const lfoG=ctx.createGain(); lfoG.gain.value = 2.5;
+      lfo.connect(lfoG); lfoG.connect(osc.frequency);
+      osc.connect(g); g.connect(synthState.padGain);
+      osc.start(); lfo.start();
+      synthState.padNodes.push(osc,lfo);
+    });
+    synthState.melodyGain = ctx.createGain();
+    synthState.melodyGain.gain.value = 0.4;
+    synthState.melodyGain.connect(masterGain);
+  }
+  const melody = [
+    {f:523.25, d:0.5},{f:659.25, d:0.5},{f:783.99, d:0.75},{f:659.25, d:0.5},{f:523.25, d:0.75},{f:0, d:0.3},
+    {f:587.33, d:0.5},{f:698.46, d:0.5},{f:880.00, d:0.75},{f:698.46, d:0.5},{f:587.33, d:0.75},{f:0, d:0.3},
+    {f:659.25, d:0.5},{f:783.99, d:0.5},{f:987.77, d:0.9},{f:880.00, d:0.6},{f:783.99, d:0.6},{f:659.25, d:0.9},{f:0, d:0.6}
+  ];
+  let melodyIdx=0;
+  function playMelodyNote(){
+    if(!isPlaying || usingMp3) return;
+    const note = melody[melodyIdx];
+    if(note.f>0){
+      const now=ctx.currentTime;
+      const osc=ctx.createOscillator(); osc.type='sine'; osc.frequency.value=note.f;
+      const g=ctx.createGain();
+      g.gain.setValueAtTime(0,now);
+      g.gain.linearRampToValueAtTime(0.35, now+0.05);
+      g.gain.exponentialRampToValueAtTime(0.001, now+note.d*1.6);
+      osc.connect(g); g.connect(synthState.melodyGain);
+      osc.start(now); osc.stop(now+note.d*1.7);
+    }
+    melodyIdx=(melodyIdx+1)%melody.length;
+    synthState.melodyTimer=setTimeout(playMelodyNote, note.d*1000);
+  }
+  function startSynth(){
+    buildContext();
+    if(!synthState.padGain) buildSynth();
+    masterGain.gain.cancelScheduledValues(ctx.currentTime);
+    masterGain.gain.setValueAtTime(masterGain.gain.value, ctx.currentTime);
+    masterGain.gain.linearRampToValueAtTime(0.5, ctx.currentTime+1.2);
+    melodyIdx=0;
+    setTimeout(playMelodyNote, 500);
+    if(ctx.state==='suspended') ctx.resume().catch(()=>{});
+    startPanRotation();
+  }
+  function stopSynth(){
+    if(synthState.melodyTimer){ clearTimeout(synthState.melodyTimer); synthState.melodyTimer=null; }
+  }
+
+  // ---------- Start / Stop ----------
+  function start(){
+    isPlaying=true;
+    btn.classList.add('playing');
+    np.classList.add('show');
+    if(!hasTriedMp3){
+      startMp3();  // try MP3 first; falls back to synth on error
+    } else {
+      // already know MP3 doesn't exist
+      npLabel.textContent='melody on ♫';
+      startSynth();
+    }
+  }
+  function stop(){
+    isPlaying=false;
+    btn.classList.remove('playing');
+    np.classList.remove('show');
+    masterGain.gain.cancelScheduledValues(ctx.currentTime);
+    masterGain.gain.setValueAtTime(masterGain.gain.value, ctx.currentTime);
+    masterGain.gain.linearRampToValueAtTime(0, ctx.currentTime+0.6);
+    stopPanRotation();
+    stopSynth();
+    if(audioEl){
+      audioEl.pause();
+    }
   }
 
   btn.addEventListener('click',()=>{
-    if(isPlaying) stop8D(); else start8D();
+    if(isPlaying) stop(); else start();
+  });
+
+  // pause on tab hidden
+  document.addEventListener('visibilitychange',()=>{
+    if(!ctx) return;
+    if(document.hidden && isPlaying){
+      masterGain.gain.cancelScheduledValues(ctx.currentTime);
+      masterGain.gain.setValueAtTime(masterGain.gain.value, ctx.currentTime);
+      masterGain.gain.linearRampToValueAtTime(0, ctx.currentTime+0.3);
+      stopPanRotation();
+      stopSynth();
+      if(audioEl) audioEl.pause();
+    } else if(!document.hidden && isPlaying){
+      masterGain.gain.cancelScheduledValues(ctx.currentTime);
+      masterGain.gain.setValueAtTime(masterGain.gain.value, ctx.currentTime);
+      masterGain.gain.linearRampToValueAtTime(usingMp3?0.85:0.5, ctx.currentTime+0.8);
+      if(usingMp3 && audioEl){ audioEl.play().catch(()=>{}); }
+      else { melodyIdx=0; setTimeout(playMelodyNote, 400); }
+      startPanRotation();
+    }
   });
 })();
 </script>
